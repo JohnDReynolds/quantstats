@@ -801,8 +801,9 @@ def _prepare_benchmark(benchmark=None, period="max", rf=0.0, prepare_returns=Tru
     _prepare_returns()
 
     period can be options or (expected) _pd.DatetimeIndex range
-    Daily observations align by UTC date while retaining strategy timestamps;
-    indexes with multiple observations per day retain timestamp alignment.
+    Daily observations align by UTC date, or by the benchmark's calendar when
+    UTC conversion would move a date label backward. Strategy timestamps are
+    retained; indexes with multiple observations per day keep timestamp alignment.
     """
     if benchmark is None:
         return None
@@ -815,6 +816,7 @@ def _prepare_benchmark(benchmark=None, period="max", rf=0.0, prepare_returns=Tru
     elif isinstance(benchmark, _pd.DataFrame):
         benchmark = benchmark[benchmark.columns[0]].copy()
 
+    benchmark_index = benchmark.index
     # Normalize before alignment: callers may already have prepared the
     # strategy's index, leaving an aware benchmark against a naive UTC period.
     if hasattr(benchmark.index, "tz") and benchmark.index.tz is not None:
@@ -831,8 +833,29 @@ def _prepare_benchmark(benchmark=None, period="max", rf=0.0, prepare_returns=Tru
         if isinstance(benchmark_prices.index, _pd.DatetimeIndex):
             benchmark_dates = benchmark_prices.index.normalize()
             period_dates = period.normalize()
+            if benchmark_index.tz is not None:
+                local_benchmark_dates = benchmark_index.tz_localize(None).normalize()
+                local_period_dates = (
+                    period.tz_localize("UTC")
+                    .tz_convert(benchmark_index.tz)
+                    .tz_localize(None)
+                    .normalize()
+                )
+                # Positive-offset midnight labels can become the previous UTC
+                # date. Match daily observations in the benchmark's calendar
+                # in that case, preserving the UTC basis for other calendars.
+                if (
+                    local_benchmark_dates.is_unique
+                    and local_period_dates.is_unique
+                    and (
+                        (benchmark_dates < local_benchmark_dates).any()
+                        or (period_dates < local_period_dates).any()
+                    )
+                ):
+                    benchmark_dates = local_benchmark_dates
+                    period_dates = local_period_dates
             # Daily timestamps label observations, not intraday availability.
-            # Do not collapse distinct observations within the same UTC day.
+            # Do not collapse distinct observations within the same day.
             if benchmark_dates.is_unique and period_dates.is_unique:
                 benchmark_prices.index = benchmark_dates
                 alignment_index = period_dates
