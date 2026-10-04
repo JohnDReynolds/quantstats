@@ -749,11 +749,16 @@ def log_returns(
     title += ")"
 
     # Prepare returns data if requested
+    # Preparation converts the index to UTC and removes its timezone.
+    # Retain the original timezone for benchmark daily-label alignment.
+    strategy_tz = getattr(returns.index, "tz", None)
     if prepare_returns:
         returns = _get_utils()._prepare_returns(returns)
 
     # Prepare benchmark data to match returns index
-    benchmark = _get_utils()._prepare_benchmark(benchmark, returns.index)  # type: ignore
+    benchmark = _get_utils()._prepare_benchmark(
+        benchmark, returns.index, strategy_tz=strategy_tz
+    )  # type: ignore
 
     # Use core plotting function with log scale enabled
     fig = _core.plot_timeseries(
@@ -1374,11 +1379,14 @@ def rolling_beta(
     Uses two different window sizes to show short-term and long-term beta trends.
     """
     # Prepare returns data if requested
+    strategy_tz = getattr(returns.index, "tz", None)
     if prepare_returns:
         returns = _get_utils()._prepare_returns(returns)
 
     # Prepare benchmark data to match returns index
-    benchmark = _get_utils()._prepare_benchmark(benchmark, returns.index)  # type: ignore
+    benchmark = _get_utils()._prepare_benchmark(
+        benchmark, returns.index, strategy_tz=strategy_tz
+    )  # type: ignore
 
     # Use core plotting function for rolling beta
     fig = _core.plot_rolling_beta(

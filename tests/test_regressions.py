@@ -821,6 +821,217 @@ class TestCausalBenchmarkAlignment:
 
         pd.testing.assert_series_equal(result, expected, rtol=1e-12, atol=1e-12)
 
+    @staticmethod
+    def _cross_timezone_case(strategy_time="16:00", as_frame=False):
+        period = pd.date_range(
+            "2024-07-01 " + strategy_time,
+            periods=3,
+            freq="D",
+            tz="America/New_York",
+        )
+        benchmark = pd.Series(
+            [0.01, 0.02, 0.03],
+            index=pd.date_range(
+                "2024-07-01 15:00", periods=3, freq="D", tz="Asia/Tokyo"
+            ),
+            name="Benchmark",
+        )
+        return period, benchmark.to_frame() if as_frame else benchmark
+
+    @pytest.mark.parametrize("strategy_time", ["10:59", "11:00", "16:00"])
+    @pytest.mark.parametrize("as_frame", [False, True])
+    @pytest.mark.parametrize("prepared", [False, True])
+    def test_cross_timezone_daily_alignment_keeps_available_observations(
+        self, strategy_time, as_frame, prepared
+    ):
+        period, benchmark = self._cross_timezone_case(strategy_time, as_frame)
+        original = benchmark.copy(deep=True)
+        output_index = period.tz_convert("UTC").tz_localize(None)
+        if prepared:
+            period = output_index
+        # Crossing Tokyo midnight at NY 11:00 does not make another benchmark
+        # observation available. All three strategy hours must use the same bars.
+        expected = pd.Series([0.0, 0.02, 0.03], index=output_index, name="Benchmark")
+
+        result = utils._prepare_benchmark(benchmark, period, prepare_returns=False)
+
+        pd.testing.assert_series_equal(result, expected, rtol=1e-12, atol=1e-12)
+        if as_frame:
+            pd.testing.assert_frame_equal(benchmark, original)
+        else:
+            pd.testing.assert_series_equal(benchmark, original)
+
+    @pytest.mark.parametrize("as_frame", [False, True])
+    @pytest.mark.parametrize("prepared", [False, True])
+    def test_future_cross_timezone_return_cannot_change_an_earlier_row(
+        self, as_frame, prepared
+    ):
+        period, benchmark = self._cross_timezone_case(as_frame=as_frame)
+        if prepared:
+            period = period.tz_convert("UTC").tz_localize(None)
+        baseline = utils._prepare_benchmark(benchmark, period, prepare_returns=False)
+        changed = benchmark.copy(deep=True)
+        changed.iloc[-1] = 0.90
+
+        result = utils._prepare_benchmark(changed, period, prepare_returns=False)
+
+        # Tokyo July 3 at 06:00 UTC follows NY July 2 at 20:00 UTC by ten hours.
+        pd.testing.assert_series_equal(
+            result.iloc[:-1], baseline.iloc[:-1], rtol=1e-12, atol=1e-12
+        )
+        assert result.iloc[-1] == pytest.approx(0.90)
+
+    @pytest.mark.parametrize(
+        ("start", "end"),
+        [("2024-07-05", "2024-07-08"), ("2024-03-08", "2024-03-11")],
+    )
+    def test_cross_timezone_weekend_return_stays_on_monday(self, start, end):
+        period = pd.date_range(
+            start + " 16:00", periods=4, freq="D", tz="America/New_York"
+        )
+        benchmark = pd.Series(
+            [0.01, 0.10],
+            index=pd.to_datetime([start + " 15:00", end + " 15:00"]).tz_localize(
+                "Asia/Tokyo"
+            ),
+            name="Benchmark",
+        )
+        expected = pd.Series(
+            [0.0, 0.0, 0.0, 0.10],
+            index=period.tz_convert("UTC").tz_localize(None),
+            name="Benchmark",
+        )
+
+        result = utils._prepare_benchmark(benchmark, period, prepare_returns=False)
+        changed = benchmark.copy(deep=True)
+        changed.iloc[-1] = 0.90
+        changed_result = utils._prepare_benchmark(
+            changed, period, prepare_returns=False
+        )
+
+        # Tokyo's Monday return is unavailable on the NY weekend, including DST.
+        pd.testing.assert_series_equal(result, expected, rtol=1e-12, atol=1e-12)
+        pd.testing.assert_series_equal(changed_result.iloc[:-1], result.iloc[:-1])
+        assert changed_result.iloc[-1] == pytest.approx(0.90)
+
+    @pytest.mark.parametrize(
+        ("timezone", "start"),
+        [("Europe/London", "2024-03-30"), ("US/Eastern", "2024-03-09")],
+    )
+    @pytest.mark.parametrize("intraday_owner", ["benchmark", "strategy"])
+    def test_strategy_calendar_context_preserves_prepared_intraday_sampling(
+        self, timezone, start, intraday_owner
+    ):
+        period = pd.date_range(
+            start,
+            periods=3 if intraday_owner == "benchmark" else 5,
+            freq="D" if intraday_owner == "benchmark" else "12h",
+            tz=timezone,
+        )
+        output_index = period.tz_convert("UTC").tz_localize(None)
+        benchmark = pd.Series(
+            [0.0, 0.10, 0.20, 0.30, 0.40]
+            if intraday_owner == "benchmark"
+            else [0.0, 0.10, 0.20],
+            index=pd.date_range(
+                start,
+                periods=5 if intraday_owner == "benchmark" else 3,
+                freq="12h" if intraday_owner == "benchmark" else "D",
+                tz=timezone,
+            ),
+            name="Benchmark",
+        )
+        original = benchmark.copy(deep=True)
+        # An already-prepared UTC grid keeps its 24-hour steps across DST.
+        # Calendar context must not restore the different native-midnight grid.
+        expected = pd.Series(
+            [0.0, 0.32, 0.0] if intraday_owner == "benchmark" else [0.0] * 5,
+            index=output_index,
+            name="Benchmark",
+        )
+
+        result = utils._prepare_benchmark(
+            benchmark,
+            output_index,
+            prepare_returns=False,
+            strategy_tz=period.tz,
+        )
+
+        pd.testing.assert_series_equal(result, expected, rtol=1e-12, atol=1e-12)
+        pd.testing.assert_series_equal(benchmark, original)
+
+    @pytest.mark.parametrize(
+        "metric", ["information_ratio", "r_squared", "greeks", "rolling_greeks"]
+    )
+    @pytest.mark.parametrize("calendar", ["cross_timezone", "shared_calendar"])
+    @pytest.mark.parametrize("as_frame", [False, True])
+    def test_public_statistics_preserve_the_strategy_calendar(
+        self, metric, calendar, as_frame
+    ):
+        if calendar == "cross_timezone":
+            period, benchmark = self._cross_timezone_case(as_frame=as_frame)
+        else:
+            period = pd.date_range(
+                "2024-07-01", periods=3, freq="D", tz="Europe/London"
+            )
+            benchmark = pd.Series(
+                [0.01, 0.02, 0.03],
+                index=period + pd.Timedelta(hours=5),
+                name="Benchmark",
+            )
+            if as_frame:
+                benchmark = benchmark.to_frame()
+        returns = pd.Series([0.0, 0.03, 0.04], index=period, name="Strategy")
+        original_returns = returns.copy(deep=True)
+        original_benchmark = benchmark.copy(deep=True)
+        # Derive the statistics from the independently aligned return vector.
+        expected_benchmark = np.array([0.0, 0.02, 0.03])
+        strategy_values = np.array([0.0, 0.03, 0.04])
+        active = strategy_values - expected_benchmark
+        covariance = np.cov(strategy_values, expected_benchmark)
+        beta = covariance[0, 1] / covariance[1, 1]
+        alpha = strategy_values.mean() - beta * expected_benchmark.mean()
+
+        if metric == "information_ratio":
+            assert stats.information_ratio(returns, benchmark) == pytest.approx(
+                active.mean() / active.std(ddof=1)
+            )
+        elif metric == "r_squared":
+            assert stats.r_squared(returns, benchmark) == pytest.approx(
+                covariance[0, 1] ** 2 / (covariance[0, 0] * covariance[1, 1])
+            )
+        elif metric == "greeks":
+            result = stats.greeks(returns, benchmark)
+            assert result["beta"] == pytest.approx(beta)
+            assert result["alpha"] == pytest.approx(alpha * 252)
+        else:
+            result = stats.rolling_greeks(returns, benchmark, periods=3)
+            pd.testing.assert_index_equal(
+                result.index, period.tz_convert("UTC").tz_localize(None)
+            )
+            assert result["beta"].iloc[-1] == pytest.approx(beta)
+            assert result["alpha"].iloc[-1] == pytest.approx(alpha)
+        pd.testing.assert_series_equal(returns, original_returns)
+        if as_frame:
+            pd.testing.assert_frame_equal(benchmark, original_benchmark)
+        else:
+            pd.testing.assert_series_equal(benchmark, original_benchmark)
+
+    def test_report_metrics_use_the_causal_cross_timezone_benchmark(self):
+        period, benchmark = self._cross_timezone_case()
+        returns = pd.Series([0.0, 0.03, 0.04], index=period, name="Strategy")
+        original_returns = returns.copy(deep=True)
+        original_benchmark = benchmark.copy(deep=True)
+
+        result = reports.metrics(returns, benchmark, display=False)
+
+        # The native table rounds fractional returns to two decimals.
+        assert result.loc["Cumulative Return", "Benchmark"] == pytest.approx(
+            round(1.02 * 1.03 - 1, 2)
+        )
+        pd.testing.assert_series_equal(returns, original_returns)
+        pd.testing.assert_series_equal(benchmark, original_benchmark)
+
 
 class TestRiskFreeDeannualization:
     """An annual rf must never be charged once per period (#552).

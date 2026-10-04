@@ -303,6 +303,9 @@ def html(
     if match_dates:
         returns = returns.dropna()
     # Clean and prepare returns data for analysis
+    # Preparation converts the index to UTC and removes its timezone.
+    # Retain the original timezone for benchmark daily-label alignment.
+    strategy_tz = getattr(returns.index, "tz", None)
     returns = _get_utils()._prepare_returns(returns)
 
     # Handle strategy title - can be single string or list for multiple columns
@@ -341,7 +344,9 @@ def html(
         else:
             benchmark_original = benchmark
         # Prepare benchmark data to match returns index and risk-free rate
-        benchmark = _get_utils()._prepare_benchmark(benchmark, returns.index, rf)
+        benchmark = _get_utils()._prepare_benchmark(
+            benchmark, returns.index, rf, strategy_tz=strategy_tz
+        )
         # Align dates between returns and benchmark if requested
         if match_dates is True:
             returns, benchmark = _match_dates(returns, benchmark)
@@ -885,11 +890,14 @@ def full(
     if match_dates:
         returns = returns.dropna()
     # Clean and prepare returns data
+    strategy_tz = getattr(returns.index, "tz", None)
     returns = _get_utils()._prepare_returns(returns)
 
     # Process benchmark if provided
     if benchmark is not None:
-        benchmark = _get_utils()._prepare_benchmark(benchmark, returns.index, rf)
+        benchmark = _get_utils()._prepare_benchmark(
+            benchmark, returns.index, rf, strategy_tz=strategy_tz
+        )
         if match_dates is True:
             returns, benchmark = _match_dates(returns, benchmark)
 
@@ -1109,11 +1117,14 @@ def basic(
     if match_dates:
         returns = returns.dropna()
     # Clean and prepare returns data
+    strategy_tz = getattr(returns.index, "tz", None)
     returns = _get_utils()._prepare_returns(returns)
 
     # Process benchmark if provided
     if benchmark is not None:
-        benchmark = _get_utils()._prepare_benchmark(benchmark, returns.index, rf)
+        benchmark = _get_utils()._prepare_benchmark(
+            benchmark, returns.index, rf, strategy_tz=strategy_tz
+        )
         if match_dates is True:
             returns, benchmark = _match_dates(returns, benchmark)
 
@@ -2010,6 +2021,7 @@ def plots(
         returns = returns.dropna()
 
     # Prepare returns data if requested
+    strategy_tz = getattr(returns.index, "tz", None)
     if prepare_returns:
         returns = _get_utils()._prepare_returns(returns)
 
@@ -2063,7 +2075,9 @@ def plots(
 
     # prepare timeseries
     if benchmark is not None:
-        benchmark = _get_utils()._prepare_benchmark(benchmark, returns.index)
+        benchmark = _get_utils()._prepare_benchmark(
+            benchmark, returns.index, strategy_tz=strategy_tz
+        )
         benchmark.name = benchmark_colname
         if match_dates is True:
             returns, benchmark = _match_dates(returns, benchmark)
