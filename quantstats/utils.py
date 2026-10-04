@@ -803,10 +803,10 @@ def _prepare_benchmark(
 
     period may be a period string or the strategy's DatetimeIndex.
     Daily observations use UTC-day keys by default. The benchmark calendar is
-    used when UTC conversion moved native daily labels backward. Strategy-side
-    movement qualifies only when the original strategy day labels match those
-    in the benchmark calendar. The chosen daily keys must be unique; otherwise,
-    the established timestamp sampling path is retained.
+    used when UTC conversion moved native benchmark or strategy labels backward
+    and the original strategy day labels match those in the benchmark calendar.
+    The chosen daily keys must be unique; otherwise, the established timestamp
+    sampling path is retained.
 
     strategy_tz is the original strategy timezone before returns preparation,
     inferred from a timezone-aware period when omitted. It supplies daily-calendar
@@ -865,19 +865,16 @@ def _prepare_benchmark(
                         .tz_localize(None)
                         .normalize()
                     )
-                # Restore native daily labels shifted backward by UTC conversion.
-                # The strategy-side exception requires matching original day labels:
-                # projecting New York into Tokyo alone cannot justify using the
-                # next Tokyo day's return.
+                # Either backward-date trigger requires a compatible strategy
+                # calendar. One midnight benchmark label must not project unrelated
+                # strategy rows onto the next day's benchmark observation.
                 if (
                     local_benchmark_dates.is_unique
                     and local_period_dates.is_unique
+                    and strategy_dates.equals(local_period_dates)
                     and (
                         (benchmark_dates < local_benchmark_dates).any()
-                        or (
-                            strategy_dates.equals(local_period_dates)
-                            and (period_dates < strategy_dates).any()
-                        )
+                        or (period_dates < strategy_dates).any()
                     )
                 ):
                     benchmark_dates = local_benchmark_dates

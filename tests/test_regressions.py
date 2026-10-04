@@ -1032,6 +1032,123 @@ class TestCausalBenchmarkAlignment:
         pd.testing.assert_series_equal(returns, original_returns)
         pd.testing.assert_series_equal(benchmark, original_benchmark)
 
+    @staticmethod
+    def _mixed_clock_case(shared_calendar=False):
+        strategy_tz = "Europe/London" if shared_calendar else "America/New_York"
+        benchmark_tz = "Europe/London" if shared_calendar else "Asia/Tokyo"
+        strategy_hour = "16:30" if shared_calendar else "16:00"
+        seed_day = "2024-06-28" if shared_calendar else "2024-06-27"
+        benchmark_seed = "2024-06-28 15:00" if shared_calendar else "2024-06-28 00:00"
+        benchmark_hour = "00:00" if shared_calendar else "15:00"
+        period = pd.to_datetime(
+            [
+                seed_day + " " + strategy_hour,
+                "2024-07-01 " + strategy_hour,
+                "2024-07-02 " + strategy_hour,
+                "2024-07-03 " + strategy_hour,
+            ]
+        ).tz_localize(strategy_tz)
+        benchmark = pd.Series(
+            [0.0, 0.01, 0.02, 0.03],
+            index=pd.to_datetime(
+                [
+                    benchmark_seed,
+                    "2024-07-01 " + benchmark_hour,
+                    "2024-07-02 " + benchmark_hour,
+                    "2024-07-03 " + benchmark_hour,
+                ]
+            ).tz_localize(benchmark_tz),
+            name="Benchmark",
+        )
+        return period, benchmark
+
+    @pytest.mark.parametrize("as_frame", [False, True])
+    @pytest.mark.parametrize("prepared", [False, True])
+    @pytest.mark.parametrize("shared_calendar", [False, True])
+    def test_mixed_clock_seed_preserves_causal_daily_alignment(
+        self, as_frame, prepared, shared_calendar
+    ):
+        period, benchmark = self._mixed_clock_case(shared_calendar)
+        if as_frame:
+            benchmark = benchmark.to_frame()
+        original = benchmark.copy(deep=True)
+        output_index = period.tz_convert("UTC").tz_localize(None)
+        context = {"strategy_tz": period.tz} if prepared else {}
+        if prepared:
+            period = output_index
+        expected = pd.Series(
+            [0.0, 0.01, 0.02, 0.03], index=output_index, name="Benchmark"
+        )
+
+        result = utils._prepare_benchmark(
+            benchmark, period, prepare_returns=False, **context
+        )
+        # Both zero seeds precede the first strategy observation. Moving only
+        # that historical label must not change the later calendar alignment.
+        seed_shifted = benchmark.copy(deep=True)
+        seed_shifted.index = pd.DatetimeIndex(
+            [pd.Timestamp("2024-06-27 15:00", tz=benchmark.index.tz)]
+            + list(benchmark.index[1:])
+        )
+        shifted_result = utils._prepare_benchmark(
+            seed_shifted, period, prepare_returns=False, **context
+        )
+        future_changed = benchmark.copy(deep=True)
+        future_changed.iloc[-1] = 0.05
+        future_result = utils._prepare_benchmark(
+            future_changed, period, prepare_returns=False, **context
+        )
+
+        pd.testing.assert_series_equal(result, expected, rtol=1e-12, atol=1e-12)
+        pd.testing.assert_series_equal(shifted_result, expected, rtol=1e-12, atol=1e-12)
+        # The last benchmark bar follows the preceding strategy observation;
+        # another label crossing UTC midnight cannot make it available sooner.
+        pd.testing.assert_series_equal(
+            future_result.iloc[:-1], expected.iloc[:-1], rtol=1e-12, atol=1e-12
+        )
+        assert future_result.iloc[-1] == pytest.approx(0.05)
+        if as_frame:
+            pd.testing.assert_frame_equal(benchmark, original)
+        else:
+            pd.testing.assert_series_equal(benchmark, original)
+
+    def test_information_ratio_uses_the_causal_mixed_clock_benchmark(self):
+        period, benchmark = self._mixed_clock_case()
+        returns = pd.Series([0.0, 0.02, 0.03, 0.04], index=period)
+        original_returns = returns.copy(deep=True)
+        original_benchmark = benchmark.copy(deep=True)
+        # Independently aligned active returns [0, .01, .01, .01] have
+        # mean .0075 and sample standard deviation .005, giving IR 1.5.
+        assert stats.information_ratio(returns, benchmark) == pytest.approx(1.5)
+        pd.testing.assert_series_equal(returns, original_returns)
+        pd.testing.assert_series_equal(benchmark, original_benchmark)
+
+    def test_future_mixed_clock_return_preserves_an_earlier_rolling_window(self):
+        period, benchmark = self._mixed_clock_case()
+        returns = pd.Series([0.0, 0.02, 0.03, 0.04], index=period)
+        original_returns = returns.copy(deep=True)
+        original_benchmark = benchmark.copy(deep=True)
+        future_changed = benchmark.copy(deep=True)
+        future_changed.iloc[-1] = 0.05
+        result = stats.rolling_greeks(returns, benchmark, periods=3)
+        future_result = stats.rolling_greeks(returns, future_changed, periods=3)
+        # The window ending July 2 excludes Tokyo's July 3 observation.
+        # Derive its regression from the three independently aligned returns.
+        strategy_values = np.array([0.0, 0.02, 0.03])
+        benchmark_values = np.array([0.0, 0.01, 0.02])
+        covariance = np.cov(strategy_values, benchmark_values)
+        beta = covariance[0, 1] / covariance[1, 1]
+        alpha = strategy_values.mean() - beta * benchmark_values.mean()
+
+        assert result["beta"].iloc[2] == pytest.approx(beta)
+        assert result["alpha"].iloc[2] == pytest.approx(alpha)
+        pd.testing.assert_series_equal(result.iloc[2], future_result.iloc[2])
+        pd.testing.assert_index_equal(
+            result.index, period.tz_convert("UTC").tz_localize(None)
+        )
+        pd.testing.assert_series_equal(returns, original_returns)
+        pd.testing.assert_series_equal(benchmark, original_benchmark)
+
 
 class TestRiskFreeDeannualization:
     """An annual rf must never be charged once per period (#552).
