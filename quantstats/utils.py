@@ -801,6 +801,8 @@ def _prepare_benchmark(benchmark=None, period="max", rf=0.0, prepare_returns=Tru
     _prepare_returns()
 
     period can be options or (expected) _pd.DatetimeIndex range
+    Daily observations align by UTC date while retaining strategy timestamps;
+    indexes with multiple observations per day retain timestamp alignment.
     """
     if benchmark is None:
         return None
@@ -813,26 +815,44 @@ def _prepare_benchmark(benchmark=None, period="max", rf=0.0, prepare_returns=Tru
     elif isinstance(benchmark, _pd.DataFrame):
         benchmark = benchmark[benchmark.columns[0]].copy()
 
+    # Normalize before alignment: callers may already have prepared the
+    # strategy's index, leaving an aware benchmark against a naive UTC period.
+    if hasattr(benchmark.index, "tz") and benchmark.index.tz is not None:
+        benchmark = benchmark.tz_convert("UTC").tz_localize(None)
+    sampling_period = period
+    if isinstance(period, _pd.DatetimeIndex) and period.tz is not None:
+        period = period.tz_convert("UTC").tz_localize(None)
+
     # Align benchmark with strategy period if needed
     if isinstance(period, _pd.DatetimeIndex) and set(period) != set(benchmark.index):
         # Adjust Benchmark to Strategy frequency
         benchmark_prices = to_prices(benchmark, base=1)
-        new_index = _pd.date_range(start=period[0], end=period[-1], freq="D")
+        alignment_index = period
+        if isinstance(benchmark_prices.index, _pd.DatetimeIndex):
+            benchmark_dates = benchmark_prices.index.normalize()
+            period_dates = period.normalize()
+            # Daily timestamps label observations, not intraday availability.
+            # Do not collapse distinct observations within the same UTC day.
+            if benchmark_dates.is_unique and period_dates.is_unique:
+                benchmark_prices.index = benchmark_dates
+                alignment_index = period_dates
+                sampling_period = period_dates
+        new_index = _pd.date_range(
+            start=sampling_period[0], end=sampling_period[-1], freq="D"
+        )
+        # Keep the original intraday sampling grid across timezone/DST changes.
+        if new_index.tz is not None:
+            new_index = new_index.tz_convert("UTC").tz_localize(None)
         benchmark = (
             # Carry prices forward so a later benchmark return cannot appear
             # on an earlier strategy date.
             benchmark_prices.reindex(new_index, method="ffill")
-            .reindex(period)
+            .reindex(alignment_index)
             .pct_change(fill_method=None)
             .fillna(0)
         )
+        benchmark.index = period
         benchmark = benchmark[benchmark.index.isin(period)]
-
-    # Normalize timezone information for consistent comparisons
-    # Convert to UTC if timezone-aware, then make naive
-    if hasattr(benchmark.index, "tz") and benchmark.index.tz is not None:
-        benchmark = benchmark.tz_convert("UTC").tz_localize(None)
-    # If already timezone-naive, no action needed
 
     # Prepare returns or return raw data. The benchmark is never converted to
     # excess returns here: callers subtract rf from strategy and benchmark
