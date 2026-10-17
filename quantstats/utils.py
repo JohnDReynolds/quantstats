@@ -805,8 +805,9 @@ def _prepare_benchmark(
     Daily observations use UTC-day keys by default. The benchmark calendar is
     used when UTC conversion moved native benchmark or strategy labels backward
     and the original strategy day labels match those in the benchmark calendar.
-    The chosen daily keys must be unique; otherwise, the established timestamp
-    sampling path is retained.
+    Daily alignment requires unique dates in each input's original calendar and
+    unique chosen daily keys. Otherwise, the established timestamp sampling path
+    is retained, even if UTC conversion puts local intraday rows on separate days.
 
     strategy_tz is the original strategy timezone before returns preparation,
     inferred from a timezone-aware period when omitted. It supplies daily-calendar
@@ -846,7 +847,22 @@ def _prepare_benchmark(
         # Adjust Benchmark to Strategy frequency
         benchmark_prices = to_prices(benchmark, base=1)
         alignment_index = period
-        if isinstance(benchmark_prices.index, _pd.DatetimeIndex):
+        strategy_dates = period.normalize()
+        if strategy_tz is not None:
+            strategy_dates = (
+                period.tz_localize("UTC")
+                .tz_convert(strategy_tz)
+                .tz_localize(None)
+                .normalize()
+            )
+        # UTC midnight must not turn multiple local intraday observations into
+        # eligible daily bars. Keep their original timestamp sampling grid.
+        # Compare local labels without constructing timezone-aware DST midnights.
+        if (
+            isinstance(benchmark_prices.index, _pd.DatetimeIndex)
+            and benchmark_index.tz_localize(None).normalize().is_unique
+            and strategy_dates.is_unique
+        ):
             benchmark_dates = benchmark_prices.index.normalize()
             period_dates = period.normalize()
             if benchmark_index.tz is not None:
@@ -857,14 +873,6 @@ def _prepare_benchmark(
                     .tz_localize(None)
                     .normalize()
                 )
-                strategy_dates = period_dates
-                if strategy_tz is not None:
-                    strategy_dates = (
-                        period.tz_localize("UTC")
-                        .tz_convert(strategy_tz)
-                        .tz_localize(None)
-                        .normalize()
-                    )
                 # Either backward-date trigger requires a compatible strategy
                 # calendar. One midnight benchmark label must not project unrelated
                 # strategy rows onto the next day's benchmark observation.

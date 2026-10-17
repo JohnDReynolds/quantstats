@@ -784,6 +784,113 @@ class TestCausalBenchmarkAlignment:
 
         pd.testing.assert_series_equal(result, expected, rtol=1e-12, atol=1e-12)
 
+    @pytest.mark.parametrize("timezone", ["Europe/London", "Asia/Tokyo"])
+    @pytest.mark.parametrize("intraday_owner", ["strategy", "benchmark"])
+    @pytest.mark.parametrize("prepared", [False, True])
+    @pytest.mark.parametrize("as_frame", [False, True])
+    def test_native_intraday_observations_keep_timestamp_sampling(
+        self, timezone, intraday_owner, prepared, as_frame
+    ):
+        if intraday_owner == "strategy":
+            period = pd.DatetimeIndex(
+                ["2024-07-01 00:00", "2024-07-01 12:00"]
+            ).tz_localize(timezone)
+            benchmark_index = pd.date_range("2024-07-01", periods=2, tz=timezone)
+            # Both strategy rows precede the second benchmark observation.
+            # The daily sampling grid omits noon, retaining its existing zero.
+            expected_returns = [0.0, 0.0]
+        else:
+            period = pd.date_range("2024-07-01 09:00", periods=2, tz=timezone)
+            benchmark_index = pd.DatetimeIndex(
+                ["2024-07-01 00:00", "2024-07-01 12:00"]
+            ).tz_localize(timezone)
+            # At 09:00 only the midnight price is observed; the noon gain is
+            # included at the following day's 09:00 sampling point.
+            expected_returns = [0.0, 0.10]
+        benchmark = pd.Series([0.0, 0.10], index=benchmark_index, name="Benchmark")
+        if as_frame:
+            benchmark = benchmark.to_frame()
+        original_benchmark = benchmark.copy(deep=True)
+        output_index = period.tz_convert("UTC").tz_localize(None)
+        expected = pd.Series(expected_returns, index=output_index, name="Benchmark")
+
+        result = utils._prepare_benchmark(
+            benchmark,
+            output_index if prepared else period,
+            prepare_returns=False,
+            strategy_tz=period.tz if prepared else None,
+        )
+
+        pd.testing.assert_series_equal(result, expected, rtol=1e-12, atol=1e-12)
+        changed = benchmark.copy(deep=True)
+        changed.iloc[-1] = 0.90
+        changed_result = utils._prepare_benchmark(
+            changed,
+            output_index if prepared else period,
+            prepare_returns=False,
+            strategy_tz=period.tz if prepared else None,
+        )
+        # The later benchmark observation remains invisible before its sample.
+        pd.testing.assert_series_equal(changed_result.iloc[:1], expected.iloc[:1])
+        assert changed_result.iloc[-1] == pytest.approx(
+            0.0 if intraday_owner == "strategy" else 0.90
+        )
+        returns = pd.Series([0.02, 0.04], index=period, name="Strategy")
+        original_returns = returns.copy(deep=True)
+        active = np.array([0.02, 0.04]) - np.array(expected_returns)
+        expected_ir = active.mean() / active.std(ddof=1)
+        assert stats.information_ratio(returns, benchmark) == pytest.approx(expected_ir)
+        qs.extend_pandas()
+        assert returns.information_ratio(benchmark) == pytest.approx(expected_ir)
+        pd.testing.assert_series_equal(returns, original_returns)
+        if as_frame:
+            pd.testing.assert_frame_equal(benchmark, original_benchmark)
+        else:
+            pd.testing.assert_series_equal(benchmark, original_benchmark)
+
+    @pytest.mark.parametrize(
+        ("timezone", "start"),
+        [("America/Sao_Paulo", "2018-11-03"), ("America/Havana", "2024-11-02")],
+    )
+    @pytest.mark.parametrize("prepared", [False, True])
+    @pytest.mark.parametrize("as_frame", [False, True])
+    def test_daily_alignment_does_not_construct_local_dst_midnight(
+        self, timezone, start, prepared, as_frame
+    ):
+        benchmark_index = pd.date_range(start + " 12:00", periods=3, tz=timezone)
+        period = benchmark_index + pd.Timedelta(hours=4)
+        benchmark = pd.Series(
+            [0.0, 0.02, 0.03], index=benchmark_index, name="Benchmark"
+        )
+        if as_frame:
+            benchmark = benchmark.to_frame()
+        original_benchmark = benchmark.copy(deep=True)
+        output_index = period.tz_convert("UTC").tz_localize(None)
+        # Noon observations are valid and have distinct local dates even when
+        # midnight on the intervening DST transition is nonexistent or ambiguous.
+        expected = pd.Series([0.0, 0.02, 0.03], index=output_index, name="Benchmark")
+
+        result = utils._prepare_benchmark(
+            benchmark,
+            output_index if prepared else period,
+            prepare_returns=False,
+            strategy_tz=period.tz if prepared else None,
+        )
+
+        pd.testing.assert_series_equal(result, expected, rtol=1e-12, atol=1e-12)
+        returns = pd.Series([0.0, 0.03, 0.04], index=period, name="Strategy")
+        original_returns = returns.copy(deep=True)
+        # Active returns [0, .01, .01] give mean / sample deviation 2/sqrt(3).
+        expected_ir = 2 / np.sqrt(3)
+        assert stats.information_ratio(returns, benchmark) == pytest.approx(expected_ir)
+        qs.extend_pandas()
+        assert returns.information_ratio(benchmark) == pytest.approx(expected_ir)
+        pd.testing.assert_series_equal(returns, original_returns)
+        if as_frame:
+            pd.testing.assert_frame_equal(benchmark, original_benchmark)
+        else:
+            pd.testing.assert_series_equal(benchmark, original_benchmark)
+
     def test_daily_alignment_preserves_strategy_labels_across_dst(self):
         period = pd.date_range("2024-03-08", periods=5, freq="D", tz="US/Eastern")
         benchmark = pd.Series(
