@@ -159,6 +159,81 @@ class TestPlotOptions:
 
 
 class TestBenchmarkAlignmentCalendars:
+    @pytest.mark.parametrize("metric", ["volatility", "sharpe", "sortino"])
+    @pytest.mark.parametrize(
+        "calendar", ["shared_calendar", "cross_timezone", "utc", "naive"]
+    )
+    @pytest.mark.parametrize("as_frame", [False, True])
+    def test_rolling_plot_preserves_daily_benchmark_observations(
+        self, metric, calendar, as_frame
+    ):
+        if calendar == "cross_timezone":
+            period = pd.date_range(
+                "2024-07-01 16:00", periods=7, freq="D", tz="America/New_York"
+            )
+            benchmark_index = pd.date_range(
+                "2024-07-01 15:00", periods=7, freq="D", tz="Asia/Tokyo"
+            )
+        else:
+            tz = {"shared_calendar": "Europe/London", "utc": "UTC", "naive": None}[
+                calendar
+            ]
+            period = pd.date_range("2024-07-01", periods=7, freq="D", tz=tz)
+            benchmark_index = period + pd.Timedelta(hours=5)
+        returns = pd.Series(
+            [0.0, -0.01, 0.03, -0.02, 0.04, -0.01, 0.02],
+            index=period,
+            name="Strategy",
+        )
+        benchmark_values = np.array([0.0, -0.02, 0.01, -0.03, 0.02, -0.01, 0.03])
+        benchmark = pd.Series(benchmark_values, index=benchmark_index, name="Benchmark")
+        if as_frame:
+            benchmark = benchmark.to_frame()
+        original_returns = returns.copy(deep=True)
+        original_benchmark = benchmark.copy(deep=True)
+
+        # Each observation belongs to its labeled day in all four calendars.
+        # Calculate the three-day windows independently of benchmark preparation
+        # and the production rolling statistics; every window has a negative return.
+        expected = []
+        for end in range(3, len(benchmark_values) + 1):
+            window = benchmark_values[end - 3 : end]
+            if metric == "volatility":
+                value = np.std(window, ddof=1)
+            elif metric == "sharpe":
+                value = np.mean(window) / np.std(window, ddof=1)
+            else:
+                downside = np.sqrt(np.sum(np.minimum(window, 0) ** 2) / 3)
+                value = np.mean(window) / downside
+            expected.append(value * np.sqrt(252))
+
+        fig = getattr(plots, "rolling_" + metric)(
+            returns, benchmark, period=3, show=False
+        )
+        try:
+            fig.canvas.draw()
+            line = next(
+                line for line in fig.axes[0].lines if line.get_label() == "Benchmark"
+            )
+            np.testing.assert_allclose(line.get_ydata(), expected, atol=1e-12)
+            expected_index = period[2:]
+            if expected_index.tz is not None:
+                expected_index = expected_index.tz_convert("UTC").tz_localize(None)
+            pd.testing.assert_index_equal(
+                pd.DatetimeIndex(line.get_xdata()), expected_index
+            )
+            assert fig.axes[0].get_legend_handles_labels()[1][:2] == [
+                "Strategy",
+                "Benchmark",
+            ]
+        finally:
+            plt.close(fig)
+        pd.testing.assert_series_equal(returns, original_returns)
+        if as_frame:
+            pd.testing.assert_frame_equal(benchmark, original_benchmark)
+        else:
+            pd.testing.assert_series_equal(benchmark, original_benchmark)
+
     @pytest.mark.parametrize("calendar", ["cross_timezone", "shared_calendar"])
     @pytest.mark.parametrize("as_frame", [False, True])
     def test_log_returns_plot_preserves_daily_benchmark_observations(
