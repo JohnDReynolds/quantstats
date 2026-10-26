@@ -28,6 +28,7 @@ import pandas as _pd
 from tabulate import tabulate as _tabulate
 
 from . import __version__
+from ._compat import normalize_timezone
 
 # Lazy imports to avoid circular dependency during package initialization
 _stats = None
@@ -1264,8 +1265,9 @@ def metrics(
     # Clean returns data if date matching is enabled
     if match_dates:
         returns = returns.dropna()
-    # Remove timezone information from index for consistent processing
-    returns.index = returns.index.tz_localize(None)
+    # Use owned UTC labels without losing the calendar needed by the benchmark.
+    strategy_tz = getattr(returns.index, "tz", None)
+    returns = normalize_timezone(returns)
 
     # Get trading periods for annualization calculations
     win_year, _ = _get_trading_periods(periods_per_year)
@@ -1317,7 +1319,9 @@ def metrics(
 
     # Process benchmark data if provided
     if benchmark is not None:
-        benchmark = _get_utils()._prepare_benchmark(benchmark, returns.index, rf)
+        benchmark = _get_utils()._prepare_benchmark(
+            benchmark, returns.index, rf, strategy_tz=strategy_tz
+        )
         if match_dates is True:
             returns, benchmark = _match_dates(returns, benchmark)
             # Truncate df to the aligned date range to exclude leading zeros

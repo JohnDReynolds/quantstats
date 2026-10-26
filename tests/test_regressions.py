@@ -1139,6 +1139,69 @@ class TestCausalBenchmarkAlignment:
         pd.testing.assert_series_equal(returns, original_returns)
         pd.testing.assert_series_equal(benchmark, original_benchmark)
 
+    @pytest.mark.parametrize("calendar", ["utc_boundary", "local_calendar"])
+    @pytest.mark.parametrize("as_frame", [False, True])
+    @pytest.mark.parametrize("mode", ["basic", "full"])
+    @pytest.mark.parametrize("match_dates", [False, True])
+    def test_report_metrics_preserve_original_calendar_at_utc_boundary(
+        self, calendar, as_frame, mode, match_dates
+    ):
+        if calendar == "utc_boundary":
+            period = pd.date_range("2024-07-01 23:00", periods=4, tz="America/New_York")
+            # New York 23:00 falls on the following UTC date; Tokyo 15:00 does not.
+            utc_index = pd.date_range("2024-07-02 03:00", periods=4)
+            expected_values = [0.0, 0.03, 0.04, 0.0]
+        else:
+            period = pd.date_range("2024-07-01", periods=4, tz="Asia/Tokyo")
+            # Tokyo midnight crosses UTC midnight, but its original local days
+            # still match the benchmark's calendar and retain all daily gains.
+            utc_index = pd.date_range("2024-06-30 15:00", periods=4)
+            expected_values = [0.0, 0.02, 0.03, 0.04]
+        returns = pd.Series([0.01, -0.02, 0.03, 0.04], index=period, name="Strategy")
+        benchmark = pd.Series(
+            [0.0, 0.02, 0.03, 0.04],
+            index=pd.date_range("2024-07-01 15:00", periods=4, tz="Asia/Tokyo"),
+            name="Benchmark",
+        )
+        reference_returns = pd.Series(
+            [0.01, -0.02, 0.03, 0.04], index=utc_index, name="Strategy"
+        )
+        reference_benchmark = pd.Series(
+            expected_values, index=utc_index, name="Benchmark"
+        )
+        if as_frame:
+            returns, benchmark = returns.to_frame(), benchmark.to_frame()
+            reference_returns = reference_returns.to_frame()
+            reference_benchmark = reference_benchmark.to_frame()
+        original_returns = returns.copy(deep=True)
+        original_benchmark = benchmark.copy(deep=True)
+
+        # The control is independently pre-aligned, so it bypasses calendar
+        # reconstruction while exercising the complete public report table.
+        reference = reports.metrics(
+            reference_returns,
+            reference_benchmark,
+            display=False,
+            mode=mode,
+            match_dates=match_dates,
+        )
+        result = reports.metrics(
+            returns, benchmark, display=False, mode=mode, match_dates=match_dates
+        )
+
+        expected_cumulative = np.prod(1 + np.array(expected_values)) - 1
+        assert result.loc["Cumulative Return", "Benchmark"] == pytest.approx(
+            round(expected_cumulative, 2)
+        )
+        pd.testing.assert_frame_equal(result, reference)
+        check = (
+            pd.testing.assert_frame_equal
+            if as_frame
+            else pd.testing.assert_series_equal
+        )
+        check(returns, original_returns)
+        check(benchmark, original_benchmark)
+
     @staticmethod
     def _mixed_clock_case(shared_calendar=False):
         strategy_tz = "Europe/London" if shared_calendar else "America/New_York"
